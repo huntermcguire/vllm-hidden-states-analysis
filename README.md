@@ -9,7 +9,10 @@ Current usage during experimentation is:
 ```bash
 hf download RedHatAI/Qwen3-8B-speculator.eagle3 --local-dir Qwen3-8B-speculator.eagle3
 ```
-3. Manually change the "speculators_model_type" field to "extract_hidden_states" in the downloaded models `config.json` file.
+3. Manually update `config.json` file:
+- change the "speculators_model_type" field to "extract_hidden_states"
+- set the "eagle_aux_hidden_state_layer_ids" field to the layer ids of the hidden states to extract. (e.g. `[1, 2, 3]` for the first 3 layers)
+- set the "transformer_layer_config.hidden_size" field to the original hidden size * the number of hidden states to extract. (e.g. `1024 * 3 = 3072` for the first 3 layers)
 4. Load the modified model with vLLM:
 ```python
 from vllm import LLM
@@ -36,7 +39,7 @@ In `src/vllm_hidden_states_extractor/model.py`, the `HiddenStatesExtractor` mode
 - [x] Add plugin registration to pyproject.toml
 - [x] Register dummy model and fake speculator
 - [x] Implement a dummy model placeholder
-- [ ] Handle logic to prevent multiple layers getting combined before model forward is called
+- [x] Handle logic to prevent multiple hidden states getting combined before model forward is called
 - [ ] Cache hidden states received by the model into its layers "KV cache"
 - [ ] Use existing KVCacheConnector to extract all hidden states
 - [ ] Create a filter KVCacheConnector to only extract hidden states from dummy layers

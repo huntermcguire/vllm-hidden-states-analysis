@@ -52,6 +52,7 @@ class LlamaModel(nn.Module):
         vllm_config: VllmConfig,
         start_layer_id: int = 0,
         prefix: str = "",
+        num_hidden_states: int = 3,
     ) -> None:
         super().__init__()
         self.config = vllm_config.speculative_config.draft_model_config.hf_config
@@ -70,18 +71,18 @@ class LlamaModel(nn.Module):
 
         self.embed_tokens = VocabParallelEmbedding(
             self.config.vocab_size,
-            self.config.hidden_size,
+            self.config.hidden_size // num_hidden_states,
             prefix=maybe_prefix(prefix, "embed_tokens"),
         )
 
         if self.use_aux_hidden_state:
             if hasattr(self.config, "target_hidden_size"):
-                fc_input_size = self.config.target_hidden_size * 3
+                fc_input_size = self.config.target_hidden_size * num_hidden_states
             else:
-                fc_input_size = self.config.hidden_size * 3
+                fc_input_size = self.config.hidden_size * num_hidden_states // num_hidden_states
             self.fc = ReplicatedLinear(
                 input_size=fc_input_size,
-                output_size=self.config.hidden_size,
+                output_size=self.config.hidden_size // num_hidden_states,
                 bias=False,
                 params_dtype=vllm_config.model_config.dtype,
                 quant_config=self.quant_config,
@@ -89,7 +90,7 @@ class LlamaModel(nn.Module):
                 return_bias=False,
             )
         self.norm = RMSNorm(
-            self.config.hidden_size,
+            self.config.hidden_size // num_hidden_states,
             eps=self.config.rms_norm_eps,
         )
 
@@ -219,6 +220,7 @@ class HiddenStatesExtractor(nn.Module, SupportsEagle3):
         nn.Module.__init__(self)
         print("HiddenStatesExtractor __init__")
         self.config = vllm_config.speculative_config.draft_model_config.hf_config
+        self.num_hidden_states = len(getattr(self.config, "eagle_aux_hidden_state_layer_ids", []))
         # Ensure draft_vocab_size is set
         # default to the base vocab size when absent
         if getattr(self.config, "draft_vocab_size", None) is None:
@@ -232,13 +234,13 @@ class HiddenStatesExtractor(nn.Module, SupportsEagle3):
         # proper layer_types indexing in draft models
         self.config.target_layer_count = target_layer_num
         self.model = LlamaModel(
-            vllm_config=vllm_config, prefix="model", start_layer_id=target_layer_num
+            vllm_config=vllm_config, prefix="model", start_layer_id=target_layer_num, num_hidden_states=self.num_hidden_states
         )
 
         logit_scale = getattr(self.config, "logit_scale", 1.0)
         self.lm_head = ParallelLMHead(
             self.config.draft_vocab_size,
-            self.config.hidden_size,
+            self.config.hidden_size // self.num_hidden_states,
             prefix=maybe_prefix(prefix, "lm_head"),
         )
         self.logits_processor = LogitsProcessor(
@@ -279,7 +281,10 @@ class HiddenStatesExtractor(nn.Module, SupportsEagle3):
         hidden_states: torch.Tensor,
         inputs_embeds: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        return torch.empty_like(hidden_states), torch.empty_like(hidden_states)
+        # todo: Cache hidden states
+        # hidden_states is (batch_size, hidden_size * num_hidden_states)
+        dummy_ret = hidden_states.new_zeros((hidden_states.shape[0], hidden_states.shape[1] // self.num_hidden_states))
+        return dummy_ret, dummy_ret
 
     def compute_logits(
         self,
@@ -309,10 +314,9 @@ class HiddenStatesExtractor(nn.Module, SupportsEagle3):
         self,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
-        if not self.model.use_aux_hidden_state:
-            return hidden_states
-        # combine multiple auxiliary hidden states returned by eagle3
-        return self.model.fc(hidden_states)
+        # no-op. We return the full hidden states so that they are all passed into the forward fn where they will be cached. 
+        # Note: this requires setting the dummy model hidden size to (num_hidden_states * hidden_size)
+        return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         return None
