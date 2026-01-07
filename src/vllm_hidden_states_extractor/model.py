@@ -24,7 +24,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
 )
-from vllm.model_executor.models.interfaces import SupportsEagle3
+from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.multimodal.inputs import NestedTensors
 
 from vllm.model_executor.models.utils import (
@@ -79,7 +79,9 @@ class LlamaModel(nn.Module):
             if hasattr(self.config, "target_hidden_size"):
                 fc_input_size = self.config.target_hidden_size * num_hidden_states
             else:
-                fc_input_size = self.config.hidden_size * num_hidden_states // num_hidden_states
+                fc_input_size = (
+                    self.config.hidden_size * num_hidden_states // num_hidden_states
+                )
             self.fc = ReplicatedLinear(
                 input_size=fc_input_size,
                 output_size=self.config.hidden_size // num_hidden_states,
@@ -191,7 +193,7 @@ class CacheOnlyAttentionLayer(nn.Module, AttentionLayerBase):
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
-    
+
         self.attn_backend = get_attn_backend(
             head_dim,
             torch.get_default_dtype(),
@@ -215,12 +217,14 @@ class CacheOnlyAttentionLayer(nn.Module, AttentionLayerBase):
         )
 
 
-class HiddenStatesExtractor(nn.Module, SupportsEagle3):
+class HiddenStatesExtractor(Eagle3LlamaForCausalLM):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         nn.Module.__init__(self)
         print("HiddenStatesExtractor __init__")
         self.config = vllm_config.speculative_config.draft_model_config.hf_config
-        self.num_hidden_states = len(getattr(self.config, "eagle_aux_hidden_state_layer_ids", []))
+        self.num_hidden_states = len(
+            getattr(self.config, "eagle_aux_hidden_state_layer_ids", [])
+        )
         # Ensure draft_vocab_size is set
         # default to the base vocab size when absent
         if getattr(self.config, "draft_vocab_size", None) is None:
@@ -234,7 +238,10 @@ class HiddenStatesExtractor(nn.Module, SupportsEagle3):
         # proper layer_types indexing in draft models
         self.config.target_layer_count = target_layer_num
         self.model = LlamaModel(
-            vllm_config=vllm_config, prefix="model", start_layer_id=target_layer_num, num_hidden_states=self.num_hidden_states
+            vllm_config=vllm_config,
+            prefix="model",
+            start_layer_id=target_layer_num,
+            num_hidden_states=self.num_hidden_states,
         )
 
         logit_scale = getattr(self.config, "logit_scale", 1.0)
@@ -283,7 +290,14 @@ class HiddenStatesExtractor(nn.Module, SupportsEagle3):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # todo: Cache hidden states
         # hidden_states is (batch_size, hidden_size * num_hidden_states)
-        dummy_ret = hidden_states.new_zeros((hidden_states.shape[0], hidden_states.shape[1] // self.num_hidden_states))
+
+        # forward_context: ForwardContext = get_forward_context()
+        # attn_metadata = forward_context.attn_metadata
+        # self_kv_cache = self.layers[0].kv_cache[forward_context.virtual_engine]
+
+        dummy_ret = hidden_states.new_zeros(
+            (hidden_states.shape[0], hidden_states.shape[1] // self.num_hidden_states)
+        )
         return dummy_ret, dummy_ret
 
     def compute_logits(
@@ -314,7 +328,7 @@ class HiddenStatesExtractor(nn.Module, SupportsEagle3):
         self,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
-        # no-op. We return the full hidden states so that they are all passed into the forward fn where they will be cached. 
+        # no-op. We return the full hidden states so that they are all passed into the forward fn where they will be cached.
         # Note: this requires setting the dummy model hidden size to (num_hidden_states * hidden_size)
         return hidden_states
 
