@@ -7,6 +7,8 @@ from vllm.attention.backends.abstract import (
     AttentionType,
     is_quantized_kv_cache,
 )
+from vllm.attention.backends.registry import AttentionBackendEnum, register_backend
+from vllm.attention.layer import get_attention_context
 from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
 from vllm.v1.attention.backends.utils import (
@@ -17,6 +19,7 @@ from dataclasses import dataclass
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 
+@register_backend(AttentionBackendEnum.CUSTOM)
 class CacheOnlyAttentionBackend(AttentionBackend):
     accept_output_buffer: bool = False
     supported_dtypes: ClassVar[list[torch.dtype]] = [
@@ -29,7 +32,7 @@ class CacheOnlyAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "CACHE_ONLY_ATTENTION"
+        return "CUSTOM"
 
     @classmethod
     def supports_attn_type(cls, attn_type: str) -> bool:
@@ -90,14 +93,7 @@ class CacheOnlyAttentionMetadata:
     prefix_kv_lens: torch.Tensor | None
     suffix_kv_lens: torch.Tensor | None
 
-    # Block info
-    total_cache_tokens: int
-    block_size: int
-    max_possible_sequence_length: int
     num_reqs: int
-    physical_to_logical: torch.Tensor
-    decode_offset: torch.Tensor
-    num_blocks_per_seq: torch.Tensor
 
     # For logging.
     num_input_tokens: int = 0  # Number of tokens including padding.
@@ -176,7 +172,6 @@ class CacheOnlyAttentionMetadataBuilder(
             prefix_kv_lens=prefix_kv_lens,
             suffix_kv_lens=suffix_kv_lens,
             num_reqs=num_reqs,
-            num_blocks_per_seq=num_blocks_per_seq,
         )
         return out
 
