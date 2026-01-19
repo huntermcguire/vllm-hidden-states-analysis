@@ -23,6 +23,11 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.distributed.kv_transfer import (
+    get_kv_transfer_group,
+    has_kv_transfer_group,
+    is_v1_kv_transfer_group,
+)
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.multimodal.inputs import NestedTensors
 
@@ -353,6 +358,9 @@ class HiddenStatesExtractor(Eagle3LlamaForCausalLM):
         # self_kv_cache = self.layers[0].kv_cache[forward_context.virtual_engine]
 
         self.layers[0].forward(hidden_states)
+        if has_kv_transfer_group() and is_v1_kv_transfer_group():
+            kv_connector = get_kv_transfer_group()
+            kv_connector.real_clear_connector_metadata()
 
         dummy_ret = hidden_states.new_zeros(
             (hidden_states.shape[0], hidden_states.shape[1] // self.num_hidden_states)

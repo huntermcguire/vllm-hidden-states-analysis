@@ -4,6 +4,7 @@ def register():
         register_speculator,
         update_eagle3,
     )
+    from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 
     @register_speculator("extract_hidden_states")
     def update_extract_hidden_states(config_dict: dict, vllm_config: dict) -> None:
@@ -19,4 +20,11 @@ def register():
         ModelRegistry.register_model(
             "HiddenStatesExtractor",
             "vllm_hidden_states_extractor.model:HiddenStatesExtractor",
+        )
+
+    if "ModifiedExampleConnector" not in KVConnectorFactory._registry:
+        KVConnectorFactory.register_connector(
+            "ModifiedExampleConnector",
+            "vllm_hidden_states_extractor.connector",
+            "ModifiedExampleConnector",
         )
