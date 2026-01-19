@@ -13,6 +13,7 @@ hf download RedHatAI/Qwen3-8B-speculator.eagle3 --local-dir Qwen3-8B-speculator.
 - change the "speculators_model_type" field to "extract_hidden_states"
 - set the "eagle_aux_hidden_state_layer_ids" field to the layer ids of the hidden states to extract. (e.g. `[1, 2, 3, 4]` for the first 4 layers)
 - set the "transformer_layer_config.hidden_size" field to the original hidden size * the number of hidden states to extract. (e.g. `1024 * 4 = 4096` for the first 4 layers)
+- set "transformer_layer_config.num_key_value_heads" to the same value as "transformer_layer_config.num_attention_heads"
 4. Load the modified model with vLLM:
 ```python
 from vllm import LLM
@@ -20,7 +21,7 @@ from vllm import LLM
 from vllm.config import KVTransferConfig
 
 ktc = KVTransferConfig(
-    kv_connector="ExampleConnector",
+    kv_connector="ModifiedExampleConnector", # light wrapper over ExampleConnector
     kv_role="kv_producer",
 )
 
@@ -55,7 +56,7 @@ In `src/vllm_hidden_states_extractor/model.py`, the `CacheOnlyAttentionLayer` is
 - [x] Implement a dummy model placeholder
 - [x] Handle logic to prevent multiple hidden states getting combined before model forward is called
 - [x] Cache hidden states received by the model into its layers "KV cache"
-- [ ] Use existing KVCacheConnector to extract all hidden states
+- [x] Use existing KVCacheConnector to extract all hidden states (Needed to modify the connector)
 - [ ] Create a filter KVCacheConnector to only extract hidden states from dummy layers
 - [ ] Cleanup model code
 - [ ] Swap out vLLM proposer class for simpler one?
