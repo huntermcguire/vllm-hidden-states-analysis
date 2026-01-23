@@ -15,7 +15,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorRole,
 )
 from vllm.logger import init_logger
-from vllm.utils.hashing import safe_hash
 from vllm.v1.attention.backends.mla.common import MLACommonMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 
@@ -75,7 +74,7 @@ class ExampleHiddenStatesConnectorMetadata(KVConnectorMetadata):
         block_size: int,
     ) -> None:
         self.requests.append(
-            ReqMeta.make_meta(req_id,token_ids, block_ids, block_size)
+            ReqMeta.make_meta(req_id, token_ids, block_ids, block_size)
         )
 
 
@@ -109,9 +108,7 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1):
             getattr(spec_config, "eagle_aux_hidden_state_layer_ids", [])
         )
 
-    
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
-
         # Filter layers to only include CacheOnlyAttentionLayers
         layers = get_layers_from_vllm_config(
             self._vllm_config, CacheOnlyAttentionLayer, kv_caches.keys()
@@ -178,20 +175,28 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1):
                 num_pages, page_size = layer.shape[0], layer.shape[1]
                 return layer.reshape(num_pages * page_size, -1)[slot_mapping, ...]
             num_pages, page_size = layer.shape[1], layer.shape[2]
-            padded_kv = layer.reshape(2, num_pages * page_size, -1)[:, slot_mapping, ...]
+            padded_kv = layer.reshape(2, num_pages * page_size, -1)[
+                :, slot_mapping, ...
+            ]
             return padded_kv[:, :num_tokens, ...]
-
 
         connector_metadata = self._get_connector_metadata()
         assert isinstance(connector_metadata, ExampleHiddenStatesConnectorMetadata)
         for request in connector_metadata.requests:
             filename = self._generate_filename_debug(
-                "hidden_states", 
+                "hidden_states",
                 request.req_id,
             )
-            kv_cache = extract_kv_from_layer(kv_layer, request.slot_mapping, request.token_ids.shape[0])
-            hidden_states = reshape_hidden_states_from_kv_cache(kv_cache, self.num_hidden_states)
-            tensors = {"hidden_states": hidden_states.detach().cpu(), "token_ids": request.token_ids.detach().cpu()}
+            kv_cache = extract_kv_from_layer(
+                kv_layer, request.slot_mapping, request.token_ids.shape[0]
+            )
+            hidden_states = reshape_hidden_states_from_kv_cache(
+                kv_cache, self.num_hidden_states
+            )
+            tensors = {
+                "hidden_states": hidden_states.detach().cpu(),
+                "token_ids": request.token_ids.detach().cpu(),
+            }
             safetensors.torch.save_file(tensors, filename)
 
     def wait_for_save(self):
@@ -258,7 +263,6 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1):
     # Helper functions
     # ==============================
 
-
     def _generate_foldername_debug(
         self,
         # token_ids: torch.Tensor,
@@ -285,9 +289,7 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1):
         """Generate a file name based on the file name and the hash
         of the bytes of the input ids.
         """
-        foldername = self._generate_foldername_debug(
-            foldername, create_folder=True
-        )
+        foldername = self._generate_foldername_debug(foldername, create_folder=True)
         return os.path.join(foldername, f"{file_name}.safetensors")
 
     def clear_connector_metadata(self):

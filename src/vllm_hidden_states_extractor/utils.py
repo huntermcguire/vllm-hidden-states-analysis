@@ -1,6 +1,9 @@
 import torch
 
-def reshape_hidden_states_for_kv_cache(hidden_states: torch.Tensor, head_size: int) -> tuple[torch.Tensor, torch.Tensor]:
+
+def reshape_hidden_states_for_kv_cache(
+    hidden_states: torch.Tensor, head_size: int
+) -> tuple[torch.Tensor, torch.Tensor]:
     # hidden_states shape: [batch_size, hidden_size * num_hidden_states]
     # e.g. hidden_states = torch.cat([h_1, h_2, ..., h_n], dim=1)
     # where h_i is a hidden state of shape [batch_size, hidden_size]
@@ -16,7 +19,10 @@ def reshape_hidden_states_for_kv_cache(hidden_states: torch.Tensor, head_size: i
     value = value.view(batch_size, -1, head_size)
     return key, value
 
-def reshape_hidden_states_from_kv_cache(kv: torch.Tensor, num_hidden_states: int) -> torch.Tensor:
+
+def reshape_hidden_states_from_kv_cache(
+    kv: torch.Tensor, num_hidden_states: int
+) -> torch.Tensor:
     # kv shape: [2, batch_size, hidden_size / head_size * num_hidden_states / 2, head_size]
     kv = kv.flatten(2)
     # kv shape: [2, batch_size, hidden_size * num_hidden_states / 2]
