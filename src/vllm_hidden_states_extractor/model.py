@@ -6,18 +6,16 @@ from collections.abc import Iterable
 import torch
 import torch.nn as nn
 
-from vllm.attention.backends.abstract import AttentionBackend, AttentionType
-from vllm.attention.layer import Attention, get_attention_context
-from vllm.attention.backends.registry import AttentionBackendEnum
+from vllm.v1.attention.backend import AttentionBackend, AttentionType
+from vllm.attention.layer import get_attention_context
+
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.attention.utils.kv_transfer_utils import maybe_transfer_kv_layer
 from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
-from vllm.attention.selector import get_attn_backend
 from vllm.attention.layer import set_default_quant_scales
 from vllm.logger import init_logger
-from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,

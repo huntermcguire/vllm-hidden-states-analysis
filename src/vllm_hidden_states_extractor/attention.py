@@ -1,14 +1,8 @@
 from typing import ClassVar
 import torch
 from triton import cdiv
-from vllm.attention.backends.abstract import (
-    AttentionBackend,
-    AttentionImpl,
-    AttentionType,
-    is_quantized_kv_cache,
-)
-from vllm.attention.backends.registry import AttentionBackendEnum, register_backend
-from vllm.attention.layer import get_attention_context
+from vllm.v1.attention.backend import AttentionBackend, AttentionImpl, AttentionType, is_quantized_kv_cache
+from vllm.v1.attention.backends.registry import AttentionBackendEnum, register_backend
 from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
 from vllm.v1.attention.backends.utils import (
