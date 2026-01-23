@@ -22,9 +22,9 @@ def register():
             "vllm_hidden_states_extractor.model:HiddenStatesExtractor",
         )
 
-    if "ModifiedExampleConnector" not in KVConnectorFactory._registry:
+    if "ExampleHiddenStatesConnector" not in KVConnectorFactory._registry:
         KVConnectorFactory.register_connector(
-            "ModifiedExampleConnector",
+            "ExampleHiddenStatesConnector",
             "vllm_hidden_states_extractor.connector",
-            "ModifiedExampleConnector",
+            "ExampleHiddenStatesConnector",
         )

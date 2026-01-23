@@ -36,6 +36,7 @@ from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheSpec
 
 from vllm_hidden_states_extractor.attention import CacheOnlyAttentionBackend
+from vllm_hidden_states_extractor.utils import reshape_hidden_states_for_kv_cache
 
 logger = init_logger(__name__)
 
@@ -212,11 +213,7 @@ class CacheOnlyAttentionLayer(nn.Module, AttentionLayerBase):
         hidden_size = output_shape[-1]
         output = output.view(-1, self.num_heads, self.head_size_v)
 
-        split_size = hidden_states.shape[1] // 2
-        key, value = torch.split(hidden_states, [split_size, split_size], dim=1)
-
-        key = key.view(-1, self.num_kv_heads, self.head_size)
-        value = value.view(-1, self.num_kv_heads, self.head_size_v)
+        key, value = reshape_hidden_states_for_kv_cache(hidden_states, self.head_size)
 
         # forward_context: ForwardContext = get_forward_context()
         # attn_metadata = forward_context.attn_metadata
