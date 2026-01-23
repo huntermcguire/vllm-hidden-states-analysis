@@ -4,49 +4,49 @@ WIP Plugin for extracting hidden states from vLLM.
 ## Usage
 Current usage during experimentation is:
 
-1. pip install vllm and this plugin project. (`pip install .`)
-2. Download an eagle3 spec model from the Hugging Face Model Hub. e.g. 
+1. Install vllm and this plugin:
 ```bash
-hf download RedHatAI/Qwen3-8B-speculator.eagle3 --local-dir Qwen3-8B-speculator.eagle3
+uv pip install . "vllm==0.14.0"
 ```
-3. Manually update `config.json` file:
-- change the "speculators_model_type" field to "extract_hidden_states"
-- set the "eagle_aux_hidden_state_layer_ids" field to the layer ids of the hidden states to extract. (e.g. `[1, 2, 3, 4]` for the first 4 layers)
-- set the "transformer_layer_config.hidden_size" field to the original hidden size * the number of hidden states to extract. (e.g. `1024 * 4 = 4096` for the first 4 layers)
-- set "transformer_layer_config.num_key_value_heads" to the same value as "transformer_layer_config.num_attention_heads"
-4. Load the modified model with vLLM:
-```python
-from vllm import LLM
 
-from vllm.config import KVTransferConfig
+2. Serve the model with kv connector
+```bash
+vllm serve ./demo/qwen3_8b --kv-transfer-config '{"kv_connector":"ExampleHiddenStatesConnector","kv_role":"kv_producer","kv_connector_extra_config": {"shared_storage_path": "/tmp/hidden_states"}}'
 
-ktc = KVTransferConfig(
-    kv_connector="ModifiedExampleConnector", # light wrapper over ExampleConnector
-    kv_role="kv_producer",
-)
-
-llm = LLM(model="Qwen3-8B-speculator-eagle3", kv_transfer_config=ktc)
-outputs = llm.generate("Hello world")
-
-print(outputs)
+For more information on the model config, see `demo/qwen3_8b/README.md`.
 ```
+3. Send a request to the model:
+```bash
+curl http://localhost:8000/v1/completions     -H "Content-Type: application/json"     -d '{
+        "model": "./demo/qwen3_8b",
+        "prompt": "Why are hidden states required for Eagle3 training?"
+    }'
+```
+4. Verify the hidden states are extracted.
+These will be saved to `/tmp/hidden_states/{request_id}/hidden_states.safetensors`. For this PoC
+they are stored as a safetensors file with two tensors: 
+  - "hidden_states": [num_hidden_states=4, seq_len, hidden_size] 
+  - "token_ids": [seq_len]
+
 
 ## Structure
-In `pyproject.toml`, the plugin is registered as a "plugin" using:
+In `pyproject.toml`, the plugin is registered
 ```toml
 [project.entry-points."vllm.general_plugins"]
 register_hidden_states_extractor = "vllm_hidden_states_extractor:register"
 ```
 
-When vLLM is initialized, it will call the `register` function in `src/vllm_hidden_states_extractor/__init__.py`, which registers the plugin.
+When vLLM is initialized, it will call the `register` function in `src/vllm_hidden_states_extractor/__init__.py`, which initializes the plugin.
 
-In `src/vllm_hidden_states_extractor/__init__.py`, the `register` function registers the "HiddenStatesExtractor" model and a fake speculator type "extract_hidden_states" (with its handler function).
+In `src/vllm_hidden_states_extractor/__init__.py`, the `register` function registers the "HiddenStatesExtractor" model and a fake speculator type "extract_hidden_states" (with its handler function) and the "ExampleHiddenStatesConnector" kv connector.
 
 In `src/vllm_hidden_states_extractor/model.py`, the `HiddenStatesExtractor` model is defined. It is intended to be a dummy model that just caches the received hidden states into its layers "KV cache".
 
 In `src/vllm_hidden_states_extractor/attention.py`, the `CacheOnlyAttentionBackend` is defined. It is a custom attention backend that just caches the received hidden states into its layers "KV cache".
 
 In `src/vllm_hidden_states_extractor/model.py`, the `CacheOnlyAttentionLayer` is defined. It is a custom attention layer intended to work with the `CacheOnlyAttentionBackend`. This is partially needed because otherwise FDSP has a check that finds all `Attention` (official vllm attention class) layers and checks that they are using the FSDP backend. Unfortunately, this will fail for our custom attention backend. By creating a custom attention layer that also subclasses `AttentionLayerBase`, we can bypass this check.
+
+In `src/vllm_hidden_states_extractor/connector.py`, the `ExampleHiddenStatesConnector` is defined. It is a simple kv connector that extracts the kv cache for each request (only from CacheOnlyAttentionLayers), reshapes the layers to match the hidden states shape, and saves them to disk. 
 
 
 ## Status
@@ -57,7 +57,7 @@ In `src/vllm_hidden_states_extractor/model.py`, the `CacheOnlyAttentionLayer` is
 - [x] Handle logic to prevent multiple hidden states getting combined before model forward is called
 - [x] Cache hidden states received by the model into its layers "KV cache"
 - [x] Use existing KVCacheConnector to extract all hidden states (Needed to modify the connector)
-- [ ] Create a filter KVCacheConnector to only extract hidden states from dummy layers
-- [ ] Cleanup model code
-- [ ] Swap out vLLM proposer class for simpler one?
+- ~~[ ] Create a filter KVConnector to only extract hidden states from dummy layers~~
+- ~~[ ] Cleanup model code~~
+- [x] Create a simple KV connector that writes hidden states to disk
 - [ ] Determine what vLLM changes are needed for better support
