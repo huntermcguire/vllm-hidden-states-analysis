@@ -6,8 +6,9 @@ Current usage during experimentation is:
 
 1. Install vllm and this plugin:
 ```bash
-uv pip install . "vllm==0.14.0"
+uv pip install -e . 
 ```
+Note: vLLM 0.14.0 is a dependency of the plugin and will be installed automatically.
 
 2. Serve the model with kv connector
 ```bash
