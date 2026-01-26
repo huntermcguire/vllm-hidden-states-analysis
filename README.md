@@ -1,5 +1,13 @@
 # vllm-hidden-states-extractor
-WIP Plugin for extracting hidden states from vLLM.
+PoC Plugin for extracting hidden states from vLLM.
+
+![Diagram showing the overall flow of the PoC](./assets/plugin-flow.png)
+
+This plugin works as follows:
+- Create a dummy Eagle3 model with `eagle_aux_hidden_state_layer_ids` set to the layers to extract hidden states from.
+- Existing vLLM plumbing will pass those hidden states into the dummy model's forward fn.
+- The dummy model will cache the hidden states into its layers "KV cache". Its layers are fake "attention" layers that only cache the hidden states and then return garbage.
+- A custom KV connector is used to extract hidden states from only the fake "attention" layers and (in for the PoC) save them to disk. 
 
 ## Usage
 Current usage during experimentation is:
@@ -13,9 +21,10 @@ Note: vLLM 0.14.0 is a dependency of the plugin and will be installed automatica
 2. Serve the model with kv connector
 ```bash
 vllm serve ./demo/qwen3_8b --kv-transfer-config '{"kv_connector":"ExampleHiddenStatesConnector","kv_role":"kv_producer","kv_connector_extra_config": {"shared_storage_path": "/tmp/hidden_states"}}'
+```
 
 For more information on the model config, see `demo/qwen3_8b/README.md`.
-```
+
 3. Send a request to the model:
 ```bash
 curl http://localhost:8000/v1/completions     -H "Content-Type: application/json"     -d '{
@@ -24,10 +33,29 @@ curl http://localhost:8000/v1/completions     -H "Content-Type: application/json
     }'
 ```
 4. Verify the hidden states are extracted.
-These will be saved to `/tmp/hidden_states/{request_id}/hidden_states.safetensors`. For this PoC
+These will be saved to `/tmp/hidden_states/{request_id}/hidden_states.safetensors` (the full filepath is returned in the kv transfer params section of the response). For this PoC
 they are stored as a safetensors file with two tensors: 
   - "hidden_states": [num_hidden_states=4, seq_len, hidden_size] 
   - "token_ids": [seq_len]
+
+  Note: the 4 is because we are extracting 4 hidden states.
+
+## Demo
+
+To run a demo with multiple clients, launch the server with kv connector
+```bash
+
+vllm serve ./demo/qwen3_8b --kv-transfer-config '{"kv_connector":"ExampleHiddenStatesConnector","kv_role":"kv_producer","kv_connector_extra_config": {"shared_storage_path": "/tmp/hidden_states"}}'
+```
+
+and then run
+
+```bash
+python demo/multi_client_demo.py --num-clients 3 --server-url http://localhost:8000 --model ./demo/qwen3_8b --num-queries 25
+```
+
+This will launch 3 client processes that will each send 25 requests / client to the server (taken the ShareGPT dataset).
+In the response from the server, the client will receive the filepath where the hidden states are saved. The client then loads the hidden states and verifies that the shapes match the expected shapes.
 
 
 ## Structure
@@ -49,16 +77,4 @@ In `src/vllm_hidden_states_extractor/model.py`, the `CacheOnlyAttentionLayer` is
 
 In `src/vllm_hidden_states_extractor/connector.py`, the `ExampleHiddenStatesConnector` is defined. It is a simple kv connector that extracts the kv cache for each request (only from CacheOnlyAttentionLayers), reshapes the layers to match the hidden states shape, and saves them to disk. 
 
-
-## Status
-
-- [x] Add plugin registration to pyproject.toml
-- [x] Register dummy model and fake speculator
-- [x] Implement a dummy model placeholder
-- [x] Handle logic to prevent multiple hidden states getting combined before model forward is called
-- [x] Cache hidden states received by the model into its layers "KV cache"
-- [x] Use existing KVCacheConnector to extract all hidden states (Needed to modify the connector)
-- ~~[ ] Create a filter KVConnector to only extract hidden states from dummy layers~~
-- ~~[ ] Cleanup model code~~
-- [x] Create a simple KV connector that writes hidden states to disk
-- [ ] Determine what vLLM changes are needed for better support
+![Diagram showing the class structure of the HiddenStatesExtractor](./assets/HiddenStatesExtractor.png)
