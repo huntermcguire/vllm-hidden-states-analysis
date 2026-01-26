@@ -34,6 +34,8 @@ logger = init_logger(__name__)
 class ReqMeta:
     # Request ID
     req_id: str
+    # Request filename
+    filename: str
     # Request tokens
     token_ids: torch.Tensor
     # Slot mappings, should have the same length as token_ids
@@ -42,6 +44,7 @@ class ReqMeta:
     @staticmethod
     def make_meta(
         req_id: str,
+        filename: str,
         token_ids: list[int],
         block_ids: list[int],
         block_size: int,
@@ -57,6 +60,7 @@ class ReqMeta:
         slot_mapping = slot_mapping.flatten()
         return ReqMeta(
             req_id=req_id,
+            filename=filename,
             token_ids=token_ids_tensor,
             slot_mapping=slot_mapping,
         )
@@ -69,12 +73,13 @@ class ExampleHiddenStatesConnectorMetadata(KVConnectorMetadata):
     def add_request(
         self,
         req_id: str,
+        filename: str,
         token_ids: list[int],
         block_ids: list[int],
         block_size: int,
     ) -> None:
         self.requests.append(
-            ReqMeta.make_meta(req_id, token_ids, block_ids, block_size)
+            ReqMeta.make_meta(req_id, filename, token_ids, block_ids, block_size)
         )
 
 
@@ -107,6 +112,8 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1):
         self.num_hidden_states = len(
             getattr(spec_config, "eagle_aux_hidden_state_layer_ids", [])
         )
+
+        self._request_filenames: dict[str, str] = {}
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         # Filter layers to only include CacheOnlyAttentionLayers
@@ -182,11 +189,8 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1):
 
         connector_metadata = self._get_connector_metadata()
         assert isinstance(connector_metadata, ExampleHiddenStatesConnectorMetadata)
+        os.makedirs(self._storage_path, exist_ok=True)
         for request in connector_metadata.requests:
-            filename = self._generate_filename_debug(
-                "hidden_states",
-                request.req_id,
-            )
             kv_cache = extract_kv_from_layer(
                 kv_layer, request.slot_mapping, request.token_ids.shape[0]
             )
@@ -197,7 +201,7 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1):
                 "hidden_states": hidden_states.detach().cpu(),
                 "token_ids": request.token_ids.detach().cpu(),
             }
-            safetensors.torch.save_file(tensors, filename)
+            safetensors.torch.save_file(tensors, request.filename)
 
     def wait_for_save(self):
         return
@@ -250,47 +254,41 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1):
 
         for new_req in scheduler_output.scheduled_new_reqs:
             token_ids = new_req.prompt_token_ids or []
+            filename = os.path.join(self._storage_path, f"{new_req.req_id}.safetensors")
             meta.add_request(
                 new_req.req_id,
+                filename=filename,
                 token_ids=token_ids,
                 block_ids=new_req.block_ids[0],
                 block_size=self._block_size,
             )
+            self._request_filenames[new_req.req_id] = filename
 
         return meta
 
-    # ==============================
-    # Helper functions
-    # ==============================
-
-    def _generate_foldername_debug(
+    def request_finished(
         self,
-        # token_ids: torch.Tensor,
-        foldername: str,
-        create_folder=False,
-    ) -> str:
-        """Generate a folder name based on the hash of the bytes of the input
-        ids.
+        request: "Request",
+        block_ids: list[int],
+    ) -> tuple[bool, dict[str, Any] | None]:
         """
-        # token_bytes = token_ids.numpy().tobytes()
-        # input_ids_hash = safe_hash(token_bytes, usedforsecurity=False).hexdigest()
+        Called exactly once when a request has finished, before its blocks are
+        freed.
 
-        foldername = os.path.join(self._storage_path, foldername)
-        if create_folder:
-            os.makedirs(foldername, exist_ok=True)
-        return foldername
+        The connector may assumes responsibility for freeing the blocks
+        asynchronously by returning True.
 
-    def _generate_filename_debug(
-        self,
-        file_name: str,
-        foldername: str,
-        # token_ids: torch.Tensor,
-    ) -> str:
-        """Generate a file name based on the file name and the hash
-        of the bytes of the input ids.
+        Returns:
+            True if the request is being saved/sent asynchronously and blocks
+            should not be freed until the request_id is returned from
+            get_finished().
+            Optional KVTransferParams to be included in the request outputs
+            returned by the engine.
         """
-        foldername = self._generate_foldername_debug(foldername, create_folder=True)
-        return os.path.join(foldername, f"{file_name}.safetensors")
+        req_id = request.request_id
+        req_filename = self._request_filenames.pop(req_id, None)
+
+        return False, {"hidden_states_path": req_filename}
 
     def clear_connector_metadata(self):
         pass
