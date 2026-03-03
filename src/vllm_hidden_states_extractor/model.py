@@ -8,6 +8,7 @@ import torch.nn as nn
 
 from vllm.v1.attention.backend import AttentionBackend, AttentionType
 from vllm.attention.layer import get_attention_context
+from vllm.forward_context import get_forward_context
 
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.attention.utils.kv_transfer_utils import maybe_transfer_kv_layer
@@ -195,16 +196,32 @@ class CacheOnlyAttentionLayer(nn.Module, AttentionLayerBase):
 
     def forward(
         self,
-        hidden_states: torch.Tensor,  # shape: [batch_size, hidden_size * num_hidden_states]
+        hidden_states: torch.Tensor,  # shape: [num_tokens, hidden_size * num_hidden_states]
         output_shape: torch.Size | None = None,
     ):
+        # --- Last-token-only filtering ---
+        # Extract only the last token per request to minimize KV cache usage
+        # and give the classifier exactly one hidden state vector per layer per request.
+        forward_context = get_forward_context()
+        attn_metadata = forward_context.attn_metadata
+        if isinstance(attn_metadata, dict):
+            attn_metadata = attn_metadata[self.layer_name]
+
+        query_start_loc = attn_metadata.query_start_loc
+        num_reqs = attn_metadata.num_reqs
+        # Last token of request i is at batch index query_start_loc[i+1] - 1
+        last_token_indices = query_start_loc[1 : num_reqs + 1] - 1
+
+        hidden_states = hidden_states[last_token_indices]
+
+        # Filter slot_mapping in sync so cache writes go to the correct slots.
+        original_slot_mapping = attn_metadata.slot_mapping
+        attn_metadata.slot_mapping = original_slot_mapping[last_token_indices]
+
+        # --- Build output tensor and reshape for KV cache ---
         output_dtype = hidden_states.dtype
-        if output_shape is None:
-            # Handle both 2D [num_tokens, hidden] and
-            # 3D [num_tokens, heads, head_dim] query
-            num_tokens = hidden_states.shape[0]
-            output_shape = torch.Size((num_tokens, self.num_heads * self.head_size_v))
-        output_shape = output_shape if output_shape is not None else hidden_states.shape
+        num_tokens = hidden_states.shape[0]  # = num_reqs after filtering
+        output_shape = torch.Size((num_tokens, self.num_heads * self.head_size_v))
         output = torch.empty(
             output_shape, dtype=output_dtype, device=hidden_states.device
         )
@@ -212,23 +229,11 @@ class CacheOnlyAttentionLayer(nn.Module, AttentionLayerBase):
         output = output.view(-1, self.num_heads, self.head_size_v)
 
         key, value = reshape_hidden_states_for_kv_cache(hidden_states, self.head_size)
-
-        # forward_context: ForwardContext = get_forward_context()
-        # attn_metadata = forward_context.attn_metadata
-        # if isinstance(attn_metadata, dict):
-        #     attn_metadata = attn_metadata[self.layer_name]
-        # self_kv_cache = self.kv_cache[forward_context.virtual_engine]
-
-        # return self.impl.forward(
-        #     self,
-        #     None,
-        #     key,
-        #     value,
-        #     self_kv_cache,
-        #     attn_metadata,
-        #     output=output
-        # )
         cache_only_attention_with_kv_transfer(None, key, value, output, self.layer_name)
+
+        # Restore original slot_mapping so other code isn't affected.
+        attn_metadata.slot_mapping = original_slot_mapping
+
         return output.view(-1, hidden_size)
 
     def get_attn_backend(self) -> type[AttentionBackend]:

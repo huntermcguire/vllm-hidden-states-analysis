@@ -1,10 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import os
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Optional
 
-import safetensors
 import torch
 
 from vllm.v1.attention.backend import AttentionMetadata
@@ -18,6 +16,7 @@ from vllm.logger import init_logger
 from vllm.v1.attention.backends.mla.common import MLACommonMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 
+from vllm_hidden_states_extractor.classifier import HiddenStateClassifier
 from vllm_hidden_states_extractor.model import CacheOnlyAttentionLayer
 from vllm_hidden_states_extractor.utils import reshape_hidden_states_from_kv_cache
 
@@ -32,19 +31,13 @@ logger = init_logger(__name__)
 
 @dataclass
 class ReqMeta:
-    # Request ID
     req_id: str
-    # Request filename
-    filename: str
-    # Request tokens
     token_ids: torch.Tensor
-    # Slot mappings, should have the same length as token_ids
     slot_mapping: torch.Tensor
 
     @staticmethod
     def make_meta(
         req_id: str,
-        filename: str,
         token_ids: list[int],
         block_ids: list[int],
         block_size: int,
@@ -60,7 +53,6 @@ class ReqMeta:
         slot_mapping = slot_mapping.flatten()
         return ReqMeta(
             req_id=req_id,
-            filename=filename,
             token_ids=token_ids_tensor,
             slot_mapping=slot_mapping,
         )
@@ -73,21 +65,16 @@ class ExampleHiddenStatesConnectorMetadata(KVConnectorMetadata):
     def add_request(
         self,
         req_id: str,
-        filename: str,
         token_ids: list[int],
         block_ids: list[int],
         block_size: int,
     ) -> None:
         self.requests.append(
-            ReqMeta.make_meta(req_id, filename, token_ids, block_ids, block_size)
+            ReqMeta.make_meta(req_id, token_ids, block_ids, block_size)
         )
 
 
 class ExampleHiddenStatesConnector(KVConnectorBase_V1):
-    # NOTE: This is Simple debug implementation of the KV connector.
-    # It save / load the KV cache to / from the disk.
-    # It does extra work which will overwrite the existing prefix-cache in GPU
-    # - to remove the overhead, need to add some "mask" in the ReqMeta class
 
     def __init__(
         self,
@@ -101,22 +88,33 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1):
             kv_cache_config=kv_cache_config,
         )
         self._block_size = vllm_config.cache_config.block_size
-        self._storage_path = self._kv_transfer_config.get_from_extra_config(
-            "shared_storage_path", "/tmp"
-        )
-        self.cache_layers = []
-        logger.info(self._kv_transfer_config)
-        logger.info("Shared storage path is %s", self._storage_path)
+        self.cache_layers: list[str] = []
 
         spec_config = self._vllm_config.speculative_config.draft_model_config.hf_config
         self.num_hidden_states = len(
             getattr(spec_config, "eagle_aux_hidden_state_layer_ids", [])
         )
 
-        self._request_filenames: dict[str, str] = {}
+        # --- Classifier discovery ---
+        classifier_dir = self._kv_transfer_config.get_from_extra_config(
+            "classifier_dir", None
+        )
+        model_name = vllm_config.model_config.model
+        self._classifier: HiddenStateClassifier | None = None
+
+        if classifier_dir and model_name:
+            self._classifier = HiddenStateClassifier.discover(
+                classifier_dir, model_name
+            )
+        else:
+            logger.warning(
+                "classifier_dir not set in kv_connector_extra_config. "
+                "Classification will be skipped."
+            )
+
+        self._request_scores: dict[str, dict[int, float]] = {}
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
-        # Filter layers to only include CacheOnlyAttentionLayers
         layers = get_layers_from_vllm_config(
             self._vllm_config, CacheOnlyAttentionLayer, kv_caches.keys()
         )
@@ -124,28 +122,9 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1):
         logger.info(f"Found {len(self.cache_layers)} CacheOnlyAttentionLayers")
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs: Any) -> None:
-        """Start loading the KV cache from the connector buffer to vLLM's
-        paged KV buffer.
-
-        Args:
-            forward_context (ForwardContext): the forward context.
-            **kwargs: additional arguments for the load operation
-
-        Note:
-            The number of elements in kv_caches and layer_names should be
-            the same.
-        """
         pass
 
     def wait_for_layer_load(self, layer_name: str) -> None:
-        """Blocking until the KV for a specific layer is loaded into vLLM's
-        paged buffer.
-
-        This interface will be useful for layer-by-layer pipelining.
-
-        Args:
-            layer_name: the name of that layer
-        """
         return
 
     def save_kv_layer(
@@ -155,16 +134,6 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1):
         attn_metadata: AttentionMetadata,
         **kwargs: Any,
     ) -> None:
-        """Start saving the KV cache of the layer from vLLM's paged buffer
-        to the connector.
-
-        Args:
-            layer_name (str): the name of the layer.
-            kv_layer (torch.Tensor): the paged KV buffer of the current
-                layer in vLLM.
-            attn_metadata (AttentionMetadata): the attention metadata.
-            **kwargs: additional arguments for the save operation.
-        """
         if layer_name not in self.cache_layers:
             return
 
@@ -173,11 +142,6 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1):
             slot_mapping: torch.Tensor,
             num_tokens: int,
         ) -> torch.Tensor:
-            """Extract the KV cache from the layer.
-
-            Assume the shape of the layer is (2, num_pages, page_size, xxx)
-            if MLA is not used, and (num_pages, page_size, xxx) otherwise.
-            """
             if isinstance(attn_metadata, MLACommonMetadata):
                 num_pages, page_size = layer.shape[0], layer.shape[1]
                 return layer.reshape(num_pages * page_size, -1)[slot_mapping, ...]
@@ -189,19 +153,42 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1):
 
         connector_metadata = self._get_connector_metadata()
         assert isinstance(connector_metadata, ExampleHiddenStatesConnectorMetadata)
-        os.makedirs(self._storage_path, exist_ok=True)
+
         for request in connector_metadata.requests:
-            kv_cache = extract_kv_from_layer(
-                kv_layer, request.slot_mapping, request.token_ids.shape[0]
-            )
+            # Extract only the last token's slot from the KV cache.
+            last_pos = request.token_ids.shape[0] - 1
+            last_slot = request.slot_mapping[last_pos : last_pos + 1]
+            kv_cache = extract_kv_from_layer(kv_layer, last_slot, 1)
+
+            # Reshape from KV cache format back to per-layer hidden states.
+            # Result shape: [num_hidden_states, 1, hidden_size]
             hidden_states = reshape_hidden_states_from_kv_cache(
                 kv_cache, self.num_hidden_states
             )
-            tensors = {
-                "hidden_states": hidden_states.detach().cpu(),
-                "token_ids": request.token_ids.detach().cpu(),
-            }
-            safetensors.torch.save_file(tensors, request.filename)
+            # Squeeze the single-token dim: [num_hidden_states, hidden_size]
+            hidden_states = hidden_states.squeeze(1)
+
+            if self._classifier is None:
+                continue
+
+            # Build per-layer dict for the classifier (numpy on CPU).
+            layer_ids = getattr(
+                self._vllm_config.speculative_config.draft_model_config.hf_config,
+                "eagle_aux_hidden_state_layer_ids",
+                [],
+            )
+            hs_np = hidden_states.detach().cpu().float().numpy()
+            per_layer: dict[int, Any] = {}
+            for i, layer_id in enumerate(layer_ids):
+                per_layer[layer_id] = hs_np[i]
+
+            scores = self._classifier.classify(per_layer)
+            self._request_scores[request.req_id] = scores
+            logger.info(
+                "Jailbreak probe scores for request %s: %s",
+                request.req_id,
+                {k: f"{v:.4f}" for k, v in scores.items()},
+            )
 
     def wait_for_save(self):
         return
@@ -211,58 +198,27 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1):
         request: "Request",
         num_computed_tokens: int,
     ) -> tuple[int | None, bool]:
-        """
-        Get number of new tokens that can be loaded from the
-        external KV cache beyond the num_computed_tokens.
-
-        Args:
-            request (Request): the request object.
-            num_computed_tokens (int): the number of locally
-                computed tokens for this request
-
-        Returns:
-            the number of tokens that can be loaded from the
-            external KV cache beyond what is already computed.
-        """
-        # This connector is store-only, so we don't need to load any tokens
         return 0, False
 
     def update_state_after_alloc(
         self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
     ):
-        """
-        Update KVConnector state after block allocation.
-
-        If blocks were allocated, add to _requests_need_load,
-        such that we load the KVs in the next forward pass.
-        """
         pass
 
     def build_connector_meta(
         self,
         scheduler_output: SchedulerOutput,
     ) -> KVConnectorMetadata:
-        """Build the connector metadata for this step.
-
-        This function should NOT modify any fields in the scheduler_output.
-        Also, calling this function will reset the state of the connector.
-
-        Args:
-            scheduler_output (SchedulerOutput): the scheduler output object.
-        """
         meta = ExampleHiddenStatesConnectorMetadata()
 
         for new_req in scheduler_output.scheduled_new_reqs:
             token_ids = new_req.prompt_token_ids or []
-            filename = os.path.join(self._storage_path, f"{new_req.req_id}.safetensors")
             meta.add_request(
                 new_req.req_id,
-                filename=filename,
                 token_ids=token_ids,
                 block_ids=new_req.block_ids[0],
                 block_size=self._block_size,
             )
-            self._request_filenames[new_req.req_id] = filename
 
         return meta
 
@@ -271,24 +227,12 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1):
         request: "Request",
         block_ids: list[int],
     ) -> tuple[bool, dict[str, Any] | None]:
-        """
-        Called exactly once when a request has finished, before its blocks are
-        freed.
-
-        The connector may assumes responsibility for freeing the blocks
-        asynchronously by returning True.
-
-        Returns:
-            True if the request is being saved/sent asynchronously and blocks
-            should not be freed until the request_id is returned from
-            get_finished().
-            Optional KVTransferParams to be included in the request outputs
-            returned by the engine.
-        """
         req_id = request.request_id
-        req_filename = self._request_filenames.pop(req_id, None)
+        scores = self._request_scores.pop(req_id, None)
 
-        return False, {"hidden_states_path": req_filename}
+        if scores is not None:
+            return False, {"probe_scores": scores}
+        return False, None
 
     def clear_connector_metadata(self):
         pass
