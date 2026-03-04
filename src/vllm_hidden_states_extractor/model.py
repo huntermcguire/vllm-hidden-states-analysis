@@ -205,7 +205,13 @@ class CacheOnlyAttentionLayer(nn.Module, AttentionLayerBase):
         forward_context = get_forward_context()
         attn_metadata = forward_context.attn_metadata
         if isinstance(attn_metadata, dict):
-            attn_metadata = attn_metadata[self.layer_name]
+            attn_metadata = attn_metadata.get(self.layer_name)
+
+        # During dummy/profile runs attn_metadata is None — return a
+        # correctly-shaped zero tensor so the profiler can measure memory.
+        if attn_metadata is None:
+            hidden_size = self.num_heads * self.head_size_v
+            return hidden_states.new_zeros((hidden_states.shape[0], hidden_size))
 
         query_start_loc = attn_metadata.query_start_loc
         num_reqs = attn_metadata.num_reqs

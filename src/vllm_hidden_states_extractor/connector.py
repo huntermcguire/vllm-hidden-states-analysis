@@ -28,6 +28,10 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+# Shared across connector instances (GPU worker writes, scheduler reads).
+# Both instances live in the same engine process so a module-level dict works.
+_shared_scores: dict[str, dict[int, float]] = {}
+
 
 @dataclass
 class ReqMeta:
@@ -112,7 +116,8 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1):
                 "Classification will be skipped."
             )
 
-        self._request_scores: dict[str, dict[int, float]] = {}
+        # Scores are stored in module-level _shared_scores dict
+        # because vLLM creates two connector instances (GPU worker + scheduler).
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         layers = get_layers_from_vllm_config(
@@ -183,9 +188,9 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1):
                 per_layer[layer_id] = hs_np[i]
 
             scores = self._classifier.classify(per_layer)
-            self._request_scores[request.req_id] = scores
+            _shared_scores[request.req_id] = scores
             logger.info(
-                "Jailbreak probe scores for request %s: %s",
+                "Probe scores for %s: %s",
                 request.req_id,
                 {k: f"{v:.4f}" for k, v in scores.items()},
             )
@@ -219,7 +224,6 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1):
                 block_ids=new_req.block_ids[0],
                 block_size=self._block_size,
             )
-
         return meta
 
     def request_finished(
@@ -228,10 +232,12 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1):
         block_ids: list[int],
     ) -> tuple[bool, dict[str, Any] | None]:
         req_id = request.request_id
-        scores = self._request_scores.pop(req_id, None)
+        scores = _shared_scores.pop(req_id, None)
 
         if scores is not None:
-            return False, {"probe_scores": scores}
+            # Convert int keys to str for msgspec dict[str, Any] compat
+            str_scores = {str(k): v for k, v in scores.items()}
+            return False, {"probe_scores": str_scores}
         return False, None
 
     def clear_connector_metadata(self):
